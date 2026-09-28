@@ -208,6 +208,7 @@ struct RelayConnectionOptions {
     prefer_ipv6: Arc<AtomicBool>,
     tls_config: rustls::ClientConfig,
     auth_token: Option<String>,
+    dial_url: Option<RelayUrl>,
 }
 
 /// Possible reasons for a failed relay connection.
@@ -297,6 +298,7 @@ impl ActiveRelayActor {
             prefer_ipv6,
             tls_config,
             auth_token,
+            dial_url,
         } = opts;
 
         let mut builder = relay::client::ClientBuilder::new(
@@ -313,6 +315,9 @@ impl ActiveRelayActor {
 
         if let Some(token) = auth_token {
             builder = builder.auth_token(token);
+        }
+        if let Some(dial_url) = dial_url {
+            builder = builder.dial_url(dial_url);
         }
         builder
     }
@@ -1233,11 +1238,9 @@ impl RelayActor {
     fn start_active_relay(&mut self, url: RelayUrl) -> ActiveRelayHandle {
         debug!(?url, "Adding relay connection");
 
-        let auth_token = self
-            .config
-            .relay_map
-            .get(&url)
-            .and_then(|cfg| cfg.auth_token.clone());
+        let relay_config = self.config.relay_map.get(&url);
+        let auth_token = relay_config.as_ref().and_then(|cfg| cfg.auth_token.clone());
+        let dial_url = relay_config.as_ref().and_then(|cfg| cfg.dial_url.clone());
         let connection_opts = RelayConnectionOptions {
             secret_key: self.config.secret_key.clone(),
             #[cfg(not(wasm_browser))]
@@ -1246,6 +1249,7 @@ impl RelayActor {
             prefer_ipv6: self.config.ipv6_reported.clone(),
             tls_config: self.config.tls_config.clone(),
             auth_token,
+            dial_url,
         };
 
         // TODO: Replace 64 with PER_CLIENT_SEND_QUEUE_DEPTH once that's unused
@@ -1437,6 +1441,7 @@ mod tests {
                     .client_config(default_provider())
                     .expect("infallible"),
                 auth_token: None,
+                dial_url: None,
             },
             stop_token,
             metrics: Default::default(),

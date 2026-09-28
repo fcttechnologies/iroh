@@ -243,6 +243,17 @@ pub struct RelayConfig {
     /// Set via [`RelayConfig::with_auth_token`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_token: Option<String>,
+    /// Where this process dials the relay, when that differs from [`Self::url`].
+    ///
+    /// The relay keeps `url` as its identity everywhere else: it is the home relay this
+    /// endpoint advertises, the key peers address it by, and the one the relay map is keyed on.
+    /// Only the connection this process opens goes to `dial_url` instead, with TLS decided by
+    /// its scheme. Set it for a relay reachable more directly from here than through its public
+    /// address, such as one served on this machine's loopback.
+    ///
+    /// Set via [`RelayConfig::with_dial_url`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dial_url: Option<RelayUrl>,
 }
 
 impl RelayConfig {
@@ -252,6 +263,7 @@ impl RelayConfig {
             url,
             quic,
             auth_token: None,
+            dial_url: None,
         }
     }
 
@@ -267,6 +279,19 @@ impl RelayConfig {
         self.auth_token = Some(token.into());
         self
     }
+
+    /// Dials this relay at `dial_url` while it keeps [`Self::url`] as its identity.
+    ///
+    /// See [`RelayConfig::dial_url`].
+    pub fn with_dial_url(mut self, dial_url: RelayUrl) -> Self {
+        self.dial_url = Some(dial_url);
+        self
+    }
+
+    /// The URL this process connects to: [`Self::dial_url`] when set, else [`Self::url`].
+    pub fn connect_url(&self) -> &RelayUrl {
+        self.dial_url.as_ref().unwrap_or(&self.url)
+    }
 }
 
 impl From<RelayUrl> for RelayConfig {
@@ -275,6 +300,7 @@ impl From<RelayUrl> for RelayConfig {
             url: value,
             quic: quic_config(),
             auth_token: None,
+            dial_url: None,
         }
     }
 }

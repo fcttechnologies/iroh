@@ -4081,6 +4081,65 @@ mod tests {
         Ok(())
     }
 
+    /// A relay with a [`RelayConfig::with_dial_url`] is dialed there but keeps its own URL as its
+    /// identity: the home relay, the address peers use, and the one connections route by. The
+    /// identity here does not even resolve, so reaching `online` and connecting through it can
+    /// only have gone by the dial URL.
+    #[tokio::test]
+    #[traced_test]
+    async fn test_endpoint_relay_dial_url() -> Result {
+        let (_relay_map, relay_url, _guard) = run_relay_server_with(false).await?;
+        let identity: RelayUrl = "https://relay.dial-url-test.invalid/".parse().anyerr()?;
+        let map = || -> RelayMap {
+            RelayConfig::new(identity.clone(), None)
+                .with_dial_url(relay_url.clone())
+                .into()
+        };
+
+        let server = Endpoint::builder(presets::Minimal)
+            .relay_mode(RelayMode::Custom(map()))
+            .alpns(vec![TEST_ALPN.to_vec()])
+            .ca_tls_config(CaTlsConfig::insecure_skip_verify())
+            .bind()
+            .await?;
+        tokio::time::timeout(Duration::from_secs(10), server.online())
+            .await
+            .std_context("dial-url endpoint coming online")?;
+        let advertised: Vec<RelayUrl> = server.addr().relay_urls().cloned().collect();
+        assert_eq!(advertised, vec![identity.clone()]);
+
+        let client = Endpoint::builder(presets::Minimal)
+            .relay_mode(RelayMode::Custom(map()))
+            .ca_tls_config(CaTlsConfig::insecure_skip_verify())
+            .bind()
+            .await?;
+        let accept = {
+            let server = server.clone();
+            tokio::spawn(async move {
+                let conn = server.accept().await.expect("incoming").await.anyerr()?;
+                let mut recv = conn.accept_uni().await.anyerr()?;
+                let got = recv.read_to_end(16).await.anyerr()?;
+                Ok::<_, Error>(got)
+            })
+        };
+        let addr = EndpointAddr::new(server.id()).with_relay_url(identity);
+        let conn = tokio::time::timeout(Duration::from_secs(10), client.connect(addr, TEST_ALPN))
+            .await
+            .std_context("connecting by the relay identity")??;
+        let mut send = conn.open_uni().await.anyerr()?;
+        send.write_all(b"hello").await.anyerr()?;
+        send.finish().anyerr()?;
+        let got = tokio::time::timeout(Duration::from_secs(10), accept)
+            .await
+            .std_context("server receiving")?
+            .anyerr()??;
+        assert_eq!(got, b"hello");
+
+        client.close().await;
+        server.close().await;
+        Ok(())
+    }
+
     /// Verifies that an endpoint configured with [`RelayConfig::with_auth_token`]
     /// is admitted to a relay whose access control checks the token only when
     /// the token matches.

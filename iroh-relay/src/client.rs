@@ -157,6 +157,8 @@ pub struct ClientBuilder {
     /// Sent as an `Authorization: Bearer` header on native targets and as
     /// a `?token=` query parameter under Wasm. See [`ClientBuilder::auth_token`].
     auth_token: Option<String>,
+    /// Where to connect, when that differs from `url`. See [`ClientBuilder::dial_url`].
+    dial_url: Option<RelayUrl>,
     #[cfg(not(wasm_browser))]
     dns_resolver: DnsResolver,
     /// Cache for public keys of remote endpoints.
@@ -180,6 +182,7 @@ impl ClientBuilder {
             dns_resolver,
             key_cache: KeyCache::new(128),
             auth_token: None,
+            dial_url: None,
         }
     }
 
@@ -246,6 +249,21 @@ impl ClientBuilder {
         self
     }
 
+    /// Connects to `dial_url` instead of the relay's own URL.
+    ///
+    /// The relay is still the one named at [`ClientBuilder::new`]; only the connection goes
+    /// elsewhere, with TLS decided by `dial_url`'s scheme. For a relay this process can reach
+    /// more directly than through its public address, such as one on this machine's loopback.
+    pub fn dial_url(mut self, dial_url: RelayUrl) -> Self {
+        self.dial_url = Some(dial_url);
+        self
+    }
+
+    /// The URL a connection goes to: `dial_url` when set, else the relay's own.
+    fn connect_url(&self) -> &RelayUrl {
+        self.dial_url.as_ref().unwrap_or(&self.url)
+    }
+
     /// Set the capacity of the cache for public keys.
     pub fn key_cache_capacity(mut self, capacity: usize) -> Self {
         self.key_cache = KeyCache::new(capacity);
@@ -264,12 +282,12 @@ impl ClientBuilder {
             protos::{handshake::KeyMaterialClientAuth, relay::MAX_FRAME_SIZE},
         };
 
-        let mut dial_url = (*self.url).clone();
+        let mut dial_url = (**self.connect_url()).clone();
         dial_url.set_path(RELAY_PATH);
         // The relay URL is exchanged with the http(s) scheme in tickets and similar.
         // We need to use the ws:// or wss:// schemes when connecting with websockets, though.
         dial_url
-            .set_scheme(match self.url.scheme() {
+            .set_scheme(match self.connect_url().scheme() {
                 "http" => "ws",
                 "ws" => "ws",
                 _ => "wss",
@@ -388,12 +406,12 @@ impl ClientBuilder {
     pub async fn connect(&self) -> Result<Client, ConnectError> {
         use crate::http::AUTH_TOKEN_URL_QUERY_PARAM;
 
-        let mut dial_url = (*self.url).clone();
+        let mut dial_url = (**self.connect_url()).clone();
         dial_url.set_path(RELAY_PATH);
         // The relay URL is exchanged with the http(s) scheme in tickets and similar.
         // We need to use the ws:// or wss:// schemes when connecting with websockets, though.
         dial_url
-            .set_scheme(match self.url.scheme() {
+            .set_scheme(match self.connect_url().scheme() {
                 "http" => "ws",
                 "ws" => "ws",
                 _ => "wss",

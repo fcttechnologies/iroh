@@ -520,6 +520,7 @@ impl Probe {
                     #[cfg(not(wasm_browser))]
                     &socket_state.dns_resolver,
                     relay.url.clone(),
+                    relay.connect_url().clone(),
                     #[cfg(not(wasm_browser))]
                     tls_config,
                 )
@@ -577,7 +578,7 @@ async fn check_captive_portal(
 
     let preferred_relay = preferred_relay.and_then(|url| dm.get(&url).map(|_| url));
 
-    let url = match preferred_relay {
+    let relay = match preferred_relay {
         Some(url) => url,
         None => {
             let urls: Vec<_> = dm.urls();
@@ -590,6 +591,11 @@ async fn check_captive_portal(
             urls[i].clone()
         }
     };
+    // Where this process reaches the chosen relay, which may be a dial URL of its own.
+    let url = dm
+        .get(&relay)
+        .map(|cfg| cfg.connect_url().clone())
+        .unwrap_or(relay);
 
     let mut builder = reqwest_client_builder(tls_config, dns_resolver.clone())
         .redirect(reqwest::redirect::Policy::none());
@@ -618,7 +624,10 @@ async fn check_captive_portal(
 
     let host_name = url.host_str().unwrap_or_default();
     let challenge = format!("ts_{host_name}");
-    let portal_url = format!("http://{host_name}/generate_204");
+    let portal_url = match url.port() {
+        Some(port) => format!("http://{host_name}:{port}/generate_204"),
+        None => format!("http://{host_name}/generate_204"),
+    };
     let res = client
         .request(reqwest::Method::GET, portal_url)
         .header("X-Iroh-Challenge", &challenge)
@@ -815,10 +824,12 @@ pub(super) enum MeasureHttpsLatencyError {
 async fn run_https_probe(
     #[cfg(not(wasm_browser))] dns_resolver: &DnsResolver,
     relay: RelayUrl,
+    connect_url: RelayUrl,
     #[cfg(not(wasm_browser))] tls_config: rustls::ClientConfig,
 ) -> Result<HttpsProbeReport, MeasureHttpsLatencyError> {
     trace!("HTTPS probe start");
-    let url = relay.join(RELAY_PROBE_PATH)?;
+    // Measured where this process reaches the relay; reported under the relay's own URL.
+    let url = connect_url.join(RELAY_PROBE_PATH)?;
 
     // This should also use same connection establishment as relay client itself, which
     // needs to be more configurable so users can do more crazy things:
@@ -901,6 +912,7 @@ mod tests {
         tracing::info!(relay_url = ?relay.url , "RELAY_URL");
         let report = run_https_probe(
             &dns_resolver,
+            relay.url.clone(),
             relay.url,
             CaTlsConfig::insecure_skip_verify()
                 .client_config(default_provider())
