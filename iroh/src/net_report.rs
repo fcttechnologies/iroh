@@ -242,6 +242,24 @@ struct Reports {
     last_full: Instant,
 }
 
+impl Reports {
+    /// The newest report that measured relay latency, the basis for the next probe plan.
+    ///
+    /// An incremental report runs no relay probes when the latency is already known, so it
+    /// carries none of its own; planning from it alone would treat the latency as unknown and
+    /// re-probe every relay on the report after it. A full report clears `last` first and gets
+    /// no basis, so it probes everything; otherwise `prev` holds five minutes of reports and a
+    /// full report runs at least that often, so the basis is never older than that.
+    fn latest_measured(&self) -> Option<Report> {
+        self.last.as_ref()?;
+        self.prev
+            .values()
+            .rev()
+            .find(|r| !r.relay_latency.is_empty())
+            .cloned()
+    }
+}
+
 impl Default for Reports {
     fn default() -> Self {
         Self {
@@ -338,7 +356,7 @@ impl Client {
 
         // Start the reportgen client to start any needed probes
         let (actor, mut probe_rx) = reportgen::Client::new(
-            self.reports.last.clone(),
+            self.reports.latest_measured(),
             self.relay_map.clone(),
             self.probes.clone(),
             self.captive_portal_check,
@@ -1063,6 +1081,43 @@ mod tests {
         ep.wait_idle().await;
         server.shutdown().await?;
 
+        Ok(())
+    }
+
+    /// Between full reports, an incremental report must not re-probe a relay whose latency is
+    /// already known. The plan is chosen from the previous report, and an incremental report
+    /// carries no latency of its own, so planning from it alone re-ran the full HTTPS probe
+    /// every other report.
+    #[tokio::test(flavor = "multi_thread")]
+    #[traced_test]
+    async fn incremental_reports_do_not_reprobe_a_known_relay() -> Result<()> {
+        let (server, relay) = test_utils::relay().await;
+        let relay = RelayConfig::new(relay.url, None);
+        let relay_map = RelayMap::from(relay);
+        let tls_config = CaTlsConfig::insecure_skip_verify()
+            .client_config(default_provider())
+            .expect("infallible");
+        let mut client = Client::new(
+            DnsResolver::new(),
+            relay_map,
+            Options::new(tls_config),
+            Default::default(),
+        );
+        let if_state = IfStateDetails::fake();
+
+        let mut probed = Vec::new();
+        for _ in 0..5 {
+            let cancel = CancellationToken::new();
+            let r = client
+                .get_report(if_state.clone(), false, cancel.child_token())
+                .await;
+            probed.push(!r.relay_latency.is_empty());
+            cancel.cancel();
+        }
+        assert_eq!(probed, [true, false, false, false, false]);
+
+        drop(client);
+        server.shutdown().await?;
         Ok(())
     }
 
